@@ -66,11 +66,11 @@ func main() {
 	flag.CommandLine.BoolVar(&cacheArgs.clearCache, "clear-cache", false, "clear cachae flag")
 
 	flag.Parse()
-	if cacheArgs.origin == "" {
+	if cacheArgs.origin == "" && cacheArgs.clearCache == false {
 		panic("origin cannot be missing")
 	}
 
-	if cacheArgs.port == 0 {
+	if cacheArgs.port == 0 && cacheArgs.clearCache == false {
 		panic("port server port cannot be missing")
 	}
 
@@ -83,8 +83,7 @@ func main() {
 	}
 
 	if cacheArgs.clearCache {
-		err := red.FlushAll(context.Background()).Err()
-
+		err := red.FlushDBAsync(context.Background()).Err()
 		if err != nil {
 			utils.PrintLogs(logs, utils.ErrorLevel, err, "unable to clear cache")
 			return
