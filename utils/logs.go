@@ -3,7 +3,9 @@ package utils
 import (
 	js "encoding/json"
 	"fmt"
-	"log/slog"
+	"io"
+	"os"
+	"runtime/debug"
 	"sync"
 
 	"github.com/sirupsen/logrus"
@@ -11,6 +13,16 @@ import (
 )
 
 var logsOutputFile = "logs/cache-proxy.log"
+
+type LogsLevel int
+
+const (
+	InfoLevel LogsLevel = iota + 1
+	DebugLevel
+	WarnLevel
+	ErrorLevel
+	FatalLevel
+)
 
 type handler string
 
@@ -20,10 +32,8 @@ var (
 )
 
 type Logs struct {
-	level int
-	Msg   interface{}
-	mu    *sync.RWMutex
-	logs  *logrus.Logger
+	mu   *sync.RWMutex
+	logs *logrus.Logger
 }
 
 type BracketFormater struct{}
@@ -55,13 +65,16 @@ func NewLogs() *Logs {
 	logs := logrus.New()
 
 	logs.SetFormatter(&BracketFormater{})
-	logs.SetOutput(&lumberjack.Logger{
+	logger := &lumberjack.Logger{
 		Filename:   logsOutputFile,
 		MaxSize:    5, // megabytes
 		MaxBackups: 3,
 		MaxAge:     28,
 		Compress:   true,
-	})
+	}
+
+	multiWriter := io.MultiWriter(os.Stdout, logger)
+	logrus.SetOutput(multiWriter)
 
 	return &Logs{
 		logs: logs,
@@ -69,5 +82,40 @@ func NewLogs() *Logs {
 	}
 }
 
-func PrintLogs(level slog.Level, mu *sync.Mutex, l *Logs) {
+func (l *Logs) Debug(message ...interface{}) {
+	l.logs.Debug(message...)
+}
+
+func (l *Logs) Info(message ...interface{}) {
+	l.logs.Info(message...)
+}
+
+func (l *Logs) Warn(message ...interface{}) {
+	l.logs.Warn(message...)
+}
+
+func (l *Logs) Error(message string, err error, args ...interface{}) {
+	l.logs.WithFields(logrus.Fields{
+		"error":      err,
+		"message":    message,
+		"stacktrace": string(debug.Stack()),
+	}).Error(args...)
+}
+
+func PrintLogs(logs *Logs, levels LogsLevel, message ...interface{}) {
+	logs.mu.Lock()
+	defer logs.mu.Unlock()
+
+	switch levels {
+	case 1:
+		logs.Info(message...)
+	case 2:
+		logs.Debug(message...)
+	case 3:
+		logs.Warn(message...)
+	case 4:
+		logs.Error(message[0].(string), message[1].(error), message[2:]...)
+	default:
+		logs.logs.Fatal(message...)
+	}
 }
