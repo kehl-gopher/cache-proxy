@@ -61,7 +61,7 @@ func main() {
 
 	flag.CommandLine.StringVar(&cacheArgs.origin, "origin", "", "origin flags")
 	flag.CommandLine.IntVar(&cacheArgs.port, "port", 0, "port flags")
-	flag.CommandLine.IntVar(&cacheArgs.maxAge, "max-age", 24, "max age flags")
+	flag.CommandLine.IntVar(&cacheArgs.maxAge, "max-age", 60*60*24, "max age flags") // default to 24 hours
 
 	flag.Parse()
 	if cacheArgs.origin == "" {
@@ -87,9 +87,6 @@ func main() {
 		IdleTimeout:  time.Minute * 30,
 	}
 
-	if cacheArgs.maxAge == 0 {
-		cacheArgs.maxAge = 60 * 60 * 24 // default to 24 hours
-	}
 	// define route
 	http.Handle("GET /", recoveryMiddleware(http.HandlerFunc(proxyHandler))) // first time this nigga is useful and helpful
 
@@ -120,8 +117,6 @@ func main() {
 func sendRequest(url string, resp chan<- interface{}, r *http.Request) (int, error) {
 	url += r.URL.Path
 
-	fmt.Println(r.URL.Path)
-	fmt.Println(url)
 	res, err := http.Get(url)
 	if err != nil {
 		return res.StatusCode, err
@@ -173,7 +168,6 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 		}()
 
 		if err != nil {
-			fmt.Println(err)
 			utils.PrintLogs(logs, utils.ErrorLevel, err, fmt.Sprintf("status_code=%d", statusCode))
 			json.NewEncoder(w).Encode(res)
 			return
@@ -184,7 +178,6 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 
 		err = red.SetEx(ctx, key, dataResp, time.Second*time.Duration(cacheArgs.maxAge)).Err()
 		if err != nil {
-			fmt.Println(err)
 			reslt := Result{Message: "internal server error", StatusCode: http.StatusInternalServerError, Error: err}
 			writeResponse(w, reslt, statusCode)
 			return
