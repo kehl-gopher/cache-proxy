@@ -29,9 +29,10 @@ var (
 )
 
 type CacheFlags struct {
-	maxAge int
-	origin string
-	port   int
+	maxAge     int
+	origin     string
+	port       int
+	clearCache bool
 }
 
 type Result struct {
@@ -62,6 +63,7 @@ func main() {
 	flag.CommandLine.StringVar(&cacheArgs.origin, "origin", "", "origin flags")
 	flag.CommandLine.IntVar(&cacheArgs.port, "port", 0, "port flags")
 	flag.CommandLine.IntVar(&cacheArgs.maxAge, "max-age", 60*60*24, "max age flags") // default to 24 hours
+	flag.CommandLine.BoolVar(&cacheArgs.clearCache, "clear-cache", false, "clear cachae flag")
 
 	flag.Parse()
 	if cacheArgs.origin == "" {
@@ -80,6 +82,17 @@ func main() {
 		utils.PrintLogs(logs, utils.FatalLevel, "unable to ping redis server", err)
 	}
 
+	if cacheArgs.clearCache {
+		err := red.FlushAll(context.Background()).Err()
+
+		if err != nil {
+			utils.PrintLogs(logs, utils.ErrorLevel, err, "unable to clear cache")
+			return
+		}
+
+		utils.PrintLogs(logs, utils.InfoLevel, "cache cleared succesfully")
+		return
+	}
 	serveMux := http.Server{
 		Addr:         fmt.Sprintf(":%d", cacheArgs.port),
 		ReadTimeout:  time.Minute * 10,
@@ -87,7 +100,7 @@ func main() {
 		IdleTimeout:  time.Minute * 30,
 	}
 
-	// define route
+	// dynamically handle any routes...
 	http.Handle("GET /", recoveryMiddleware(http.HandlerFunc(proxyHandler))) // first time this nigga is useful and helpful
 
 	utils.PrintLogs(logs, utils.InfoLevel,
