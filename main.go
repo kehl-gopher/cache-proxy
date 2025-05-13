@@ -17,8 +17,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kehl-gopher/cache-proxy/utils"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/kehl-gopher/cache-proxy/utils"
+	"github.com/nitishm/go-rejson/v4"
+	"github.com/nitishm/go-rejson/v4/rjs"
 )
 
 var (
@@ -26,6 +29,7 @@ var (
 	red       *redis.Client
 	logs      *utils.Logs
 	cacheArgs CacheFlags
+	rh        *rejson.Handler
 )
 
 type CacheFlags struct {
@@ -36,10 +40,10 @@ type CacheFlags struct {
 }
 
 type Result struct {
-	StatusCode int                    `json:"status_code,omitempty"`
-	Data       map[string]interface{} `json:"data,omitempty"`
-	Message    string                 `json:"message,omitempty"`
-	Error      error                  `json:"error,omitempty"`
+	StatusCode int         `json:"status_code,omitempty"`
+	Data       interface{} `json:"data,omitempty"`
+	Message    string      `json:"message,omitempty"`
+	Error      error       `json:"error,omitempty"`
 }
 
 func recoveryMiddleware(next http.Handler) http.Handler {
@@ -77,10 +81,16 @@ func main() {
 	red = redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",
 	})
-	_, err := red.Ping(context.Background()).Result()
-	if err != nil {
-		utils.PrintLogs(logs, utils.FatalLevel, "unable to ping redis server", err)
-	}
+
+	defer func() {
+		if err := red.Close(); err != nil {
+			utils.PrintLogs(logs, utils.FatalLevel, "could not connect to redis server")
+		}
+	}()
+
+	rh = rejson.NewReJSONHandler()
+
+	rh.SetGoRedisClientWithContext(context.Background(), red)
 
 	if cacheArgs.clearCache {
 		err := red.FlushDBAsync(context.Background()).Err()
@@ -127,7 +137,10 @@ func main() {
 }
 
 func sendRequest(url string, resp chan<- interface{}, r *http.Request) (int, error) {
+
 	url += r.URL.Path
+
+	var data map[string]interface{}
 
 	res, err := http.Get(url)
 	if err != nil {
@@ -135,11 +148,17 @@ func sendRequest(url string, resp chan<- interface{}, r *http.Request) (int, err
 	}
 
 	b, _ := io.ReadAll(res.Body)
-	resp <- b
+
+	err = json.Unmarshal(b, &data)
+
+	if err != nil {
+		return 0, err
+	}
+	resp <- data
 	return res.StatusCode, nil
 }
 
-func hashKey(origin string) string {
+func hashKey(origin string, path string) string {
 
 	u, err := url.Parse(origin)
 
@@ -152,20 +171,19 @@ func hashKey(origin string) string {
 		panic(err)
 	}
 
-	key := fmt.Sprintf("cache-request/GET/%s", origin)
+	key := fmt.Sprintf("cache-request/GET/%s+%s", origin, path)
 	sha := sha256.Sum256([]byte(key))
 	return fmt.Sprintf("%x", sha[:])
 }
 
 func proxyHandler(w http.ResponseWriter, r *http.Request) {
-	key := hashKey(cacheArgs.origin)
+	key := hashKey(cacheArgs.origin, r.URL.Path)
 
-	var data = make(map[string]interface{})
-
+	var data json.RawMessage
 	resp := make(chan interface{})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*4)
 	defer cancel()
-	res, err := red.Get(ctx, key).Result()
+	res, err := getJSON(ctx, key, &data)
 
 	if err != nil && err != redis.Nil {
 		reslt := Result{Message: "internal server error", StatusCode: http.StatusInternalServerError, Error: err}
@@ -188,15 +206,13 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 
 		cacheLock.Lock()
 
-		err = red.SetEx(ctx, key, dataResp, time.Second*time.Duration(cacheArgs.maxAge)).Err()
+		err = setJSON(ctx, key, dataResp, cacheArgs.maxAge)
 		if err != nil {
 			reslt := Result{Message: "internal server error", StatusCode: http.StatusInternalServerError, Error: err}
 			writeResponse(w, reslt, statusCode)
 			return
 		}
-
-		err = json.Unmarshal(dataResp.([]byte), &data)
-		reslt := Result{StatusCode: http.StatusOK, Data: data, Message: "Cache miss"}
+		reslt := Result{StatusCode: http.StatusOK, Data: dataResp, Message: "Cache miss"}
 
 		maxAge := strconv.FormatInt(time.Now().Add(time.Second*time.Duration(cacheArgs.maxAge)).Unix(), 10)
 		w.Header().Add("X-Cache", "Miss")
@@ -208,13 +224,43 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = json.Unmarshal([]byte(res), &data)
 	reslt := Result{StatusCode: http.StatusOK, Data: data, Message: "Cache Hit"}
 
 	maxAge := strconv.FormatInt(time.Now().Add(time.Second*time.Duration(cacheArgs.maxAge)).Unix(), 10)
 	w.Header().Add("X-Cache", "Hit")
 	w.Header().Add("max-age", maxAge)
 	writeResponse(w, reslt, http.StatusOK)
+}
+
+func setJSON(ctx context.Context, key string, data interface{}, maxAge int) error {
+
+	res, err := rh.JSONSet(key, ".", data, rjs.SetOptionNX)
+	if err != nil {
+		return err
+	}
+	if res.(string) != "OK" {
+		return errors.New("failed to set json value")
+	}
+
+	err = red.Expire(ctx, key, time.Second*time.Duration(maxAge)).Err()
+
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func getJSON(ctx context.Context, key string, data interface{}) (string, error) {
+	res, err := red.Do(ctx, "JSON.GET", key, "$").Result()
+
+	if err != nil {
+		return "", err
+	}
+	err = json.Unmarshal([]byte(res.(string)), data)
+	if err != nil {
+		return "", err
+	}
+	return res.(string), nil
 }
 
 func writeResponse(w http.ResponseWriter, data interface{}, statusCode int) {

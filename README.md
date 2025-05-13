@@ -6,7 +6,7 @@ A lightweight caching reverse proxy server built with Go and Redis. It forwards 
 
 ## 🚀 Features
 
-- Caches JSON responses using Redis `SET`
+- Caches JSON responses using Redis `redisJSON`
 - Customizable cache duration via `--max-age` flag
 - Adds `X-Cache` header to indicate cache status:
   - `X-Cache: HIT` → Response served from cache
@@ -54,15 +54,11 @@ http://dummyjson.com/products
 * If it's a first-time request → response is fetched and cached → `X-Cache: MISS`
 * If repeated within the cache duration → served from cache → `X-Cache: HIT`
 
----
-
-> ⚠️ This removes **all** keys in the current Redis database.
-
----
 
 ## 🧾 Requirements
 
 * Go 1.20+
+* redis 8.0+
 * Redis running locally
 
 ---
