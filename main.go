@@ -7,7 +7,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -21,7 +20,6 @@ import (
 
 	"github.com/kehl-gopher/cache-proxy/utils"
 	"github.com/nitishm/go-rejson/v4"
-	"github.com/nitishm/go-rejson/v4/rjs"
 )
 
 var (
@@ -136,28 +134,6 @@ func main() {
 	}
 }
 
-func sendRequest(url string, resp chan<- interface{}, r *http.Request) (int, error) {
-
-	url += r.URL.Path
-
-	var data map[string]interface{}
-
-	res, err := http.Get(url)
-	if err != nil {
-		return res.StatusCode, err
-	}
-
-	b, _ := io.ReadAll(res.Body)
-
-	err = json.Unmarshal(b, &data)
-
-	if err != nil {
-		return 0, err
-	}
-	resp <- data
-	return res.StatusCode, nil
-}
-
 func hashKey(origin string, path string) string {
 
 	u, err := url.Parse(origin)
@@ -230,42 +206,4 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("X-Cache", "Hit")
 	w.Header().Add("max-age", maxAge)
 	writeResponse(w, reslt, http.StatusOK)
-}
-
-func setJSON(ctx context.Context, key string, data interface{}, maxAge int) error {
-
-	res, err := rh.JSONSet(key, ".", data, rjs.SetOptionNX)
-	if err != nil {
-		return err
-	}
-	if res.(string) != "OK" {
-		return errors.New("failed to set json value")
-	}
-
-	err = red.Expire(ctx, key, time.Second*time.Duration(maxAge)).Err()
-
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func getJSON(ctx context.Context, key string, data interface{}) (string, error) {
-	res, err := red.Do(ctx, "JSON.GET", key, "$").Result()
-
-	if err != nil {
-		return "", err
-	}
-	err = json.Unmarshal([]byte(res.(string)), data)
-	if err != nil {
-		return "", err
-	}
-	return res.(string), nil
-}
-
-func writeResponse(w http.ResponseWriter, data interface{}, statusCode int) {
-	w.WriteHeader(statusCode)
-	w.Header().Add("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(data)
-
 }
