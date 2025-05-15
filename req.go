@@ -7,10 +7,7 @@ import (
 )
 
 func sendRequest(url string, resp chan<- interface{}, r *http.Request) (int, error) {
-
 	url += r.URL.Path
-
-	var data map[string]interface{}
 
 	res, err := http.Get(url)
 	if err != nil {
@@ -19,12 +16,7 @@ func sendRequest(url string, resp chan<- interface{}, r *http.Request) (int, err
 
 	b, _ := io.ReadAll(res.Body)
 
-	err = json.Unmarshal(b, &data)
-
-	if err != nil {
-		return 0, err
-	}
-	resp <- data
+	resp <- b
 	return res.StatusCode, nil
 }
 

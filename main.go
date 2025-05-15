@@ -175,20 +175,34 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 
 		if err != nil {
 			utils.PrintLogs(logs, utils.ErrorLevel, err, fmt.Sprintf("status_code=%d", statusCode))
-			json.NewEncoder(w).Encode(res)
+			reslt := Result{Message: "internal server error", StatusCode: http.StatusInternalServerError, Error: err}
+			writeResponse(w, reslt, statusCode)
 			return
+		}
+
+		if statusCode >= 300 {
+			utils.PrintLogs(logs, utils.DebugLevel, fmt.Sprintf("status_code=%d", statusCode))
+			reslt := Result{Message: http.StatusText(statusCode), StatusCode: statusCode}
+			writeResponse(w, reslt, statusCode)
 		}
 		dataResp := <-resp
 
 		cacheLock.Lock()
+		var data json.RawMessage
+		err = json.Unmarshal(dataResp.([]byte), &data)
+		if err != nil {
+			reslt := Result{Message: "internal server error", StatusCode: http.StatusInternalServerError, Error: err}
+			writeResponse(w, reslt, statusCode)
+			return
 
-		err = setJSON(ctx, key, dataResp, cacheArgs.maxAge)
+		}
+		err = setJSON(ctx, key, data, cacheArgs.maxAge)
 		if err != nil {
 			reslt := Result{Message: "internal server error", StatusCode: http.StatusInternalServerError, Error: err}
 			writeResponse(w, reslt, statusCode)
 			return
 		}
-		reslt := Result{StatusCode: http.StatusOK, Data: dataResp, Message: "Cache miss"}
+		reslt := Result{StatusCode: http.StatusOK, Data: data, Message: "Cache miss"}
 
 		maxAge := strconv.FormatInt(time.Now().Add(time.Second*time.Duration(cacheArgs.maxAge)).Unix(), 10)
 		w.Header().Add("X-Cache", "Miss")
