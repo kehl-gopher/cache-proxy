@@ -6,18 +6,25 @@ import (
 	"net/http"
 )
 
-func sendRequest(url string, resp chan<- interface{}, r *http.Request) (int, error) {
+type Response struct {
+	StatusCode int
+	Body       []byte
+	Error      error
+}
+
+func sendRequest(url string, resp chan<- Response, r *http.Request) {
 	url += r.URL.Path
 
 	res, err := http.Get(url)
 	if err != nil {
-		return res.StatusCode, err
+		resp <- Response{StatusCode: res.StatusCode, Body: nil, Error: err}
+		return
 	}
 
+	defer res.Body.Close()
 	b, _ := io.ReadAll(res.Body)
+	resp <- Response{StatusCode: res.StatusCode, Body: b, Error: nil}
 
-	resp <- b
-	return res.StatusCode, nil
 }
 
 func writeResponse(w http.ResponseWriter, data interface{}, statusCode int) {

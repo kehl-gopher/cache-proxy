@@ -15,6 +15,10 @@ func setJSON(ctx context.Context, key string, data interface{}, maxAge int) erro
 	if err != nil {
 		return err
 	}
+
+	if res == nil {
+		return errors.New("failed to set json value")
+	}
 	if res.(string) != "OK" {
 		return errors.New("failed to set json value")
 	}

@@ -11,8 +11,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"strconv"
-	"sync"
 	"syscall"
 	"time"
 
@@ -23,11 +21,11 @@ import (
 )
 
 var (
-	cacheLock *sync.RWMutex
-	red       *redis.Client
-	logs      *utils.Logs
-	cacheArgs CacheFlags
-	rh        *rejson.Handler
+	red        *redis.Client
+	logs       *utils.Logs
+	cacheArgs  CacheFlags
+	rh         *rejson.Handler
+	redisQueue = make(chan CacheDataItem, 100)
 )
 
 type CacheFlags struct {
@@ -35,6 +33,12 @@ type CacheFlags struct {
 	origin     string
 	port       int
 	clearCache bool
+}
+
+type CacheDataItem struct {
+	Key   string
+	Value json.RawMessage
+	TTL   int
 }
 
 type Result struct {
@@ -58,9 +62,9 @@ func recoveryMiddleware(next http.Handler) http.Handler {
 
 func main() {
 
+	go startRedisWorker() // start redis queue server
+	defer close(redisQueue)
 	logs = utils.NewLogs()
-
-	cacheLock = &sync.RWMutex{}
 
 	flag.CommandLine.StringVar(&cacheArgs.origin, "origin", "", "origin flags")
 	flag.CommandLine.IntVar(&cacheArgs.port, "port", 0, "port flags")
@@ -153,71 +157,51 @@ func hashKey(origin string, path string) string {
 }
 
 func proxyHandler(w http.ResponseWriter, r *http.Request) {
-	key := hashKey(cacheArgs.origin, r.URL.Path)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*100)
+	defer cancel()
 
 	var data json.RawMessage
-	resp := make(chan interface{})
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*4)
-	defer cancel()
-	res, err := getJSON(ctx, key, &data)
+	key := hashKey(cacheArgs.origin, r.URL.Path)
+	de, err := getJSON(ctx, key, &data)
 
 	if err != nil && err != redis.Nil {
-		reslt := Result{Message: "internal server error", StatusCode: http.StatusInternalServerError, Error: err}
-		writeResponse(w, reslt, reslt.StatusCode)
-		return
-	} else if res == "" || err == redis.Nil {
-		utils.PrintLogs(logs, utils.InfoLevel, "Cache miss: data not found in cache storage ", "sending request to origin server")
-		var statusCode int
-		var err error
-		go func() {
-			statusCode, err = sendRequest(cacheArgs.origin, resp, r)
-		}()
-
-		if err != nil {
-			utils.PrintLogs(logs, utils.ErrorLevel, err, fmt.Sprintf("status_code=%d", statusCode))
-			reslt := Result{Message: "internal server error", StatusCode: http.StatusInternalServerError, Error: err}
-			writeResponse(w, reslt, statusCode)
-			return
-		}
-
-		if statusCode >= 300 {
-			utils.PrintLogs(logs, utils.DebugLevel, fmt.Sprintf("status_code=%d", statusCode))
-			reslt := Result{Message: http.StatusText(statusCode), StatusCode: statusCode}
-			writeResponse(w, reslt, statusCode)
-		}
-		dataResp := <-resp
-
-		cacheLock.Lock()
-		var data json.RawMessage
-		err = json.Unmarshal(dataResp.([]byte), &data)
-		if err != nil {
-			reslt := Result{Message: "internal server error", StatusCode: http.StatusInternalServerError, Error: err}
-			writeResponse(w, reslt, statusCode)
-			return
-
-		}
-		err = setJSON(ctx, key, data, cacheArgs.maxAge)
-		if err != nil {
-			reslt := Result{Message: "internal server error", StatusCode: http.StatusInternalServerError, Error: err}
-			writeResponse(w, reslt, statusCode)
-			return
-		}
-		reslt := Result{StatusCode: http.StatusOK, Data: data, Message: "Cache miss"}
-
-		maxAge := strconv.FormatInt(time.Now().Add(time.Second*time.Duration(cacheArgs.maxAge)).Unix(), 10)
-		w.Header().Add("X-Cache", "Miss")
-		w.Header().Add("max-age", maxAge)
-
-		writeResponse(w, reslt, statusCode)
-
-		cacheLock.Unlock()
+		utils.PrintLogs(logs, utils.FatalLevel, fmt.Sprintf("Unexpected server error while fetch data in redis %s", err.Error()))
 		return
 	}
 
-	reslt := Result{StatusCode: http.StatusOK, Data: data, Message: "Cache Hit"}
+	var resp = make(chan Response)
+	if err == redis.Nil && de == "" {
+		utils.PrintLogs(logs, utils.InfoLevel, "Cache miss: data not found in cache storage")
+		go sendRequest(cacheArgs.origin, resp, r)
+		dataResp := <-resp
+		err := json.Unmarshal(dataResp.Body, &data)
+		if err != nil {
+			utils.PrintLogs(logs, utils.FatalLevel, fmt.Sprintf("unexpected error in server level-->"))
+			writeResponse(w, dataResp, dataResp.StatusCode)
+		}
+		redisQueue <- CacheDataItem{Key: key, Value: data, TTL: cacheArgs.maxAge}
+		w.Header().Add("X-Cache", "MISS")
+		w.Header().Add("Cache-Control", fmt.Sprintf("max-age=%d", time.UnixMilli(int64(cacheArgs.maxAge)).Unix()))
+		writeResponse(w, data, dataResp.StatusCode)
+		return
+	}
 
-	maxAge := strconv.FormatInt(time.Now().Add(time.Second*time.Duration(cacheArgs.maxAge)).Unix(), 10)
-	w.Header().Add("X-Cache", "Hit")
-	w.Header().Add("max-age", maxAge)
-	writeResponse(w, reslt, http.StatusOK)
+	w.Header().Add("X-Cache", "HIT")
+	w.Header().Add("Cache-Control", fmt.Sprintf("max-age=%d", time.UnixMilli(int64(cacheArgs.maxAge)).Unix()))
+	writeResponse(w, data, http.StatusOK)
+}
+
+func startRedisWorker() {
+	go func() {
+		for queue := range redisQueue {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := setJSON(ctx, queue.Key, queue.Value, queue.TTL)
+			cancel()
+			if err != nil {
+				utils.PrintLogs(logs, utils.InfoLevel, "failed to write to redis "+err.Error(), err)
+				continue
+			}
+		}
+	}()
+
 }

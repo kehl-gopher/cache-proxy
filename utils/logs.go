@@ -114,6 +114,7 @@ func PrintLogs(logs *Logs, levels LogsLevel, message ...interface{}) {
 	case 3:
 		logs.Warn(message...)
 	case 4:
+		fmt.Println(len(message))
 		logs.Error(message[0].(string), message[1].(error), message[2:]...)
 	default:
 		logs.logs.Fatal(message...)
